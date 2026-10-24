@@ -1,416 +1,356 @@
-# GitLab Automation MCP
+# Local AI Web Search Agent — Google ADK + Ollama + DuckDuckGo 
 
-A Python Model Context Protocol (MCP) server that lets an AI client search GitLab projects, prepare release tags, and operate CI pipelines and jobs. Choose **Codex** for the client in section 1, or **Docker Agent with a local Ollama model** in section 2. Both use the same Docker image, GitLab credentials, and deployment skills.
+A hands-on Python project that runs an AI agent using **Google Agent Development Kit (ADK)**, a **local Llama 3.2 model served by Ollama**, and a **DuckDuckGo search tool**. The project illustrates model inference, tool registration, tool execution, and inspection of traces using the ADK development Web UI.
 
-These instructions use **Windows PowerShell**. Run project commands from the directory containing `DockerFile` and `requirements.txt`. Replace checkout paths with your own; do not copy another user's personal paths blindly.
+> **Project status:** Local model connection and DuckDuckGo search tool calling have been implemented and tested. **Currency conversion is planned but not implemented.** Search answer reliability is still being improved.
 
-## 1. Build and package the MCP server, then integrate it with Codex
-
-### Step 1 — Understand the components
+## 1. Architecture
 
 ```text
-Codex                               Docker Agent + Ollama
-  |                                       |
-  +----------- MCP over stdio ------------+
-                      |
-        Docker MCP Gateway --profile=gitlab
-                      |
-          gitlab-automation-mcp:local
-                      |
-              GitLab REST API
+Browser (ADK Web UI, localhost:8000)
+             |
+             v
+ADK development server / Agent Runner
+             |
+             v
+root_agent (websearch_agent/agent.py)
+             |
+             v
+LiteLLM -> Ollama HTTP API (localhost:11434) -> llama3.2:latest
+             |
+       model requests a tool call
+             v
+ADK runs Python search_web(query)
+             |
+             v
+DDGS -> web search results
+             |
+             v
+ADK returns tool results to model -> final response in Web UI
 ```
 
-The MCP server is independent of the model. `src/server.py` registers Python functions as MCP tools and starts a stdio server. `src/gitlab_client.py` implements the GitLab API calls using HTTPX. The model selects tools; the server executes them against GitLab.
+**Separation of responsibilities:** ADK manages the agent and tool execution; LiteLLM adapts the model API; Ollama serves model inference; Llama 3.2 selects a tool and generates the answer; the Python function performs the actual web request. There is **no MCP server** in this version. Installing the Python `mcp` package does not turn this Python tool into an MCP server.
 
-| File / configuration | What it does |
-| --- | --- |
-| `src/server.py` | Defines tool names, input schemas, and responses; runs MCP over stdin/stdout. |
-| `src/gitlab_client.py` | Implements project discovery, tag numbering, tag creation, pipeline and job API requests. |
-| `requirements.txt` | Installs the MCP SDK, HTTPX, and python-dotenv. |
-| `DockerFile` | Packages Python dependencies and `src/` into an image; starts `python src/server.py`. Use `-f DockerFile` because of its capitalization. |
-| `docker-mcp-server.yaml` | Describes the image, server metadata, allowed GitLab host, and secret-to-environment mappings to Docker MCP. |
-| Docker MCP profile `gitlab` | Stores the registered server selection/configuration used by the gateway. A profile is not the Docker image itself. |
-| `src/agent.yaml` | Docker Agent client configuration. Codex does not load this file. |
-| `.agents/skills/*/SKILL.md` | Project-specific release workflows. Each has YAML name/description metadata followed by Markdown instructions. |
-| `.codex/config.toml` or user `config.toml` | Codex MCP connection settings, separately from Docker Agent configuration. |
-| `.env` | Credentials for direct Python execution only; excluded from Git and Docker build context. |
-| `.mcp.json` | Existing direct-Python client example with checkout-specific paths. It does not configure Codex automatically or use the Docker profile. |
-| `.dockerignore` / `.gitignore` | Exclude local credentials, virtual environments, and Python caches from builds / version control. |
-| `tests/` | Mocked API tests; they do not create live tags or run GitLab jobs. |
+## 2. Prerequisites
 
-The server exposes these **12 tools**:
+- Windows with PowerShell and VS Code (commands below target Windows).
+- Python 3.12 (the project used **3.12.6**).
+- Ollama installed and running.
+- `llama3.2:latest` downloaded (the tested model was around 3.2B parameters, Q4_K_M, approximately 2 GB on disk, with a `tools` capability).
+- Internet connectivity for the DuckDuckGo search integration. **The LLM is local, but web searching is not offline.**
 
-| Tool | Purpose |
-| --- | --- |
-| `list_projects` | Search projects visible to the GitLab account. |
-| `list_tags` | Read all pages of repository tags. |
-| `get_next_tag` | Calculate the next `v<number>` or `proj<number>` tag without creating it. |
-| `ensure_tag` | Resolve an exact namespace/project path and reuse or create an explicit tag. |
-| `prepare_release` | Resolve the project, calculate an omitted tag name, and create/reuse it. Returns the real project ID and target SHA. |
-| `create_tag` | Create an exact tag using a known project ID and ref. |
-| `list_pipelines` | Read the 20 newest pipelines for an exact ref. |
-| `trigger_pipeline` | Start a pipeline for a ref, optionally passing CI variables. |
-| `list_pipeline_jobs` | Read job IDs, names, and statuses from a pipeline. |
-| `play_job` | Start an existing manual job. |
-| `get_pipeline_status` | Read pipeline status and details. |
-| `get_job_log` | Read the final 20,000 characters of a job trace. |
-
-Docker Agent deliberately does not expose `get_next_tag` in its current whitelist: `prepare_release` handles that operation without requiring the model to supply a numeric project ID. Codex can discover all server tools.
-
-### Step 2 — Install the prerequisites
-
-1. Install [Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/) and start it with Linux containers.
-2. Enable **MCP Toolkit** in Docker Desktop if your installation requires it. Use a release supporting MCP profiles.
-3. Install/sign in to [Codex](https://learn.chatgpt.com/docs/overview) for the Codex route.
-4. Obtain a GitLab personal access token with `api` scope and sufficient project permissions to create tags, create pipelines, and play jobs. Protected tags may require additional role permissions. See [GitLab personal access tokens](https://docs.gitlab.com/user/profile/personal_access_tokens/).
-5. Ensure the target repositories contain the intended branch (default `main`), CI configuration, and available runners if you plan to execute jobs.
-
-Check that the CLI and engine are accessible:
+Check Ollama:
 
 ```powershell
-Set-Location 'D:\Projects\AI projects\MCPs\GitLab Automation\gitlab-mcp'
-docker version
-docker mcp version
-docker mcp profile --help
+ollama --version
+ollama list
+ollama show llama3.2
+Invoke-RestMethod http://localhost:11434/api/tags
 ```
 
-`docker version` must show a **Server** section, not only the client version. This setup was checked with Docker Agent `v1.141.0` and Docker MCP `v0.43.3`; use your installed CLI help if options differ.
+Look for `tools` under model capabilities. Ollama normally listens at `http://localhost:11434`. If needed, start the Ollama application or run `ollama serve` when no server is running. Don't start a second server on an occupied port.
 
-### Step 3 — Review the server definition
+> The model's advertised context length isn't necessarily the context actually configured or allocated by Ollama. Tool-calling capability also doesn't guarantee correct tool selection or answers.
 
-The included `docker-mcp-server.yaml` names the server `gitlab-automation`, references image `gitlab-automation-mcp:local`, and maps these secrets:
+## 3. Create and activate a Python virtual environment
 
-| Docker MCP secret | Container environment variable |
-| --- | --- |
-| `gitlab-automation.GITLAB_URL` | `GITLAB_URL` |
-| `gitlab-automation.GITLAB_TOKEN` | `GITLAB_TOKEN` |
-
-Its host allowlist is `gitlab.com:443`. For self-managed GitLab, change that entry to your actual hostname/port and use that instance's URL. After changing the definition, update its imported profile registration in step 6; the gateway does not automatically reread your checkout's YAML.
-
-### Step 4 — Store the credentials in Docker MCP
-
-Set the GitLab URL and enter the token without displaying it:
+From the project's root folder (for example, `Agentwithwebsearch`):
 
 ```powershell
-'https://gitlab.com' | docker mcp secret set gitlab-automation.GITLAB_URL
-$gitlabSecureToken = Read-Host 'GitLab personal access token' -AsSecureString
-$gitlabPlainToken = [System.Net.NetworkCredential]::new('', $gitlabSecureToken).Password
-$gitlabPlainToken | docker mcp secret set gitlab-automation.GITLAB_TOKEN
-Remove-Variable gitlabSecureToken, gitlabPlainToken
-docker mcp secret ls
-```
-
-The last command lists secret names. Keep tokens out of source files, image layers, and command-line arguments. An `.env` file is unnecessary for the Docker Gateway route.
-
-### Step 5 — Build the image
-
-```powershell
-docker build -f DockerFile -t gitlab-automation-mcp:local .
-docker image inspect gitlab-automation-mcp:local --format '{{.Id}}'
-```
-
-The build uses `python:3.12-slim`, installs `requirements.txt`, copies `src/`, and sets the server entrypoint. The image contains tool code; skills remain on the client's local filesystem. The gateway launches the container and discovers its tools through the MCP protocol. No published container port is needed for stdio.
-
-### Step 6 — Register the server in the Docker MCP profile
-
-Docker MCP restricts file server definitions to its catalog directory. Copy the file there:
-
-```powershell
-$gitlabCatalogDir = Join-Path $env:USERPROFILE '.docker\mcp\catalogs\servers'
-New-Item -ItemType Directory -Path $gitlabCatalogDir -Force | Out-Null
-Copy-Item -LiteralPath '.\docker-mcp-server.yaml' -Destination (Join-Path $gitlabCatalogDir 'gitlab.yaml') -Force
-```
-
-For a new profile:
-
-```powershell
-docker mcp profile create --name gitlab --id gitlab --server file://servers/gitlab.yaml
-```
-
-If `gitlab` already exists, **add/update the server instead of creating another profile**:
-
-```powershell
-docker mcp profile server add gitlab --server file://servers/gitlab.yaml
-```
-
-Verify the registration:
-
-```powershell
-docker mcp profile show gitlab
-docker mcp profile server ls --filter profile=gitlab
-```
-
-You can also inspect **Docker Desktop → MCP Toolkit → Profiles → gitlab**. This local server is not necessarily listed in the public catalog.
-
-### Step 7 — Verify discovery and a read-only GitLab call
-
-```powershell
-docker mcp tools list --verbose --gateway-arg=--profile=gitlab
-docker mcp tools call list_projects search=myproj --gateway-arg=--profile=gitlab
-```
-
-Expect all 12 GitLab tools and actual project results from the second command. Discovery alone does not prove token authentication works. Do not use `prepare_release` as a connection test: it can create a tag.
-
-You normally do **not** start a separate gateway terminal. Each client starts its gateway subprocess. To inspect startup without attaching a client:
-
-```powershell
-docker mcp gateway run --profile=gitlab --dry-run --verbose
-```
-
-### Step 8 — Connect Codex to the gateway
-
-Merge this into `%USERPROFILE%\.codex\config.toml`, preserving existing configuration. Edit an existing `mcp_servers.gitlab` table rather than duplicating it. A trusted project-scoped `.codex/config.toml` is another option.
-
-```toml
-[mcp_servers.gitlab]
-command = 'C:\Program Files\Docker\Docker\resources\bin\docker.exe'
-args = ["mcp", "gateway", "run", "--profile=gitlab"]
-startup_timeout_sec = 60
-
-[mcp_servers.gitlab.env]
-PATH = 'C:\Program Files\Docker\Docker\resources\bin;C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem'
-```
-
-Adjust the executable path if Docker is installed elsewhere. The explicit `PATH` lets the gateway find both Docker and its credential helper when it launches child processes.
-
-If you have the Codex CLI, check registration with:
-
-```powershell
-codex mcp list
-```
-
-Restart Codex after changing MCP configuration. Open the `gitlab-mcp` folder as the project; in the CLI, launch `codex` from that folder and use `/mcp` to inspect the connection. Ask it to list projects first. Codex reads this TOML connection configuration, not `src/agent.yaml`. See [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
-
-### Step 9 — Use the deployment skills in Codex
-
-The existing directories are already in a Codex discovery location:
-
-```text
-.agents/skills/
-  deploy-myproj/SKILL.md
-  deploy-myproj2/SKILL.md
-```
-
-Open/start Codex in this project directory so it can discover them. Merely having skills in a separate or remote GitLab repository does not make them available to this session. Codex initially sees names/descriptions, then reads the selected skill instructions. See [local skill discovery](https://learn.chatgpt.com/docs/build-skills).
-
-Examples:
-
-```text
-Use $deploy-myproj to deploy proj.
-Use $deploy-myproj2 to deploy proj2 and run the build_app job.
-Use $deploy-myproj2 to create tag v2 in myproj2 and run build_app.
-```
-
-These are live operations: tag creation can trigger CI. `myproj` maps to `anish5416/myproj` and defaults to `v1`, `v2`, etc. `myproj2` maps to `anish5416/myproj2` and defaults to `proj1`, `proj2`, etc. Automatic numbering uses the highest matching integer, not creation date or alphabetical ordering. Explicit tag names override the default format.
-
-Before using this checkout with other GitLab projects, edit the project paths, aliases, prefixes, and job defaults in both skill files and `src/agent.yaml`. The Python tool code does not hardcode these project IDs.
-
-### Step 10 — Optional: run the Python MCP server directly
-
-This alternative bypasses Docker Desktop, the image, the gateway profile, and Docker secrets. It requires Python 3.12+ on the host.
-
-```powershell
+python --version
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\Activate.ps1
+python -c "import sys; print(sys.executable)"
 ```
 
-Create a local `.env` file in the project root:
+The interpreter path should end in `Agentwithwebsearch\.venv\Scripts\python.exe`.
+
+If PowerShell blocks activation, for **this terminal session only**:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+**Why:** A virtual environment separates this project's Python dependencies from global Python and other projects. VS Code's selected interpreter is independent of an activated PowerShell terminal; use **Python: Select Interpreter** to select `.venv\Scripts\python.exe` if Pylance warns that imports cannot be resolved.
+
+## 4. Declare and install dependencies
+
+Create `requirements.txt` in the root:
+
+```txt
+google-adk
+litellm>=1.84
+ddgs
+mcp
+```
+
+Then install and verify:
+
+```powershell
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip show google-adk
+python -m pip check
+adk --help
+```
+
+- `google-adk`: agent definitions, runner, development Web UI, tool orchestration and tracing.
+- `litellm`: Ollama model adapter used in this project.
+- `ddgs`: web-search client (the newer package name replacing `duckduckgo-search`).
+- `mcp`: an SDK needed by the tested environment after a `No module named 'mcp'` runtime error; **not** used here to create an MCP server. Its necessity can depend on installed dependency versions.
+
+**Why `-r` matters:** `python -m pip install -r requirements.txt` tells pip to read dependency specifications from the file. Simply creating the file doesn't install packages. Using `python -m pip` also helps ensure pip belongs to the intended Python interpreter.
+
+**Reproducibility note:** These are convenient learning-project constraints, not a fully locked installation. Pin versions or use a lockfile before deployment.
+
+## 5. Create the agent package
+
+Final structure for the current project:
+
+```text
+Agentwithwebsearch/
+├── .venv/                 # local packages; don't commit
+├── requirements.txt
+├── .gitignore
+└── websearch_agent/
+    ├── __init__.py
+    ├── agent.py
+    ├── tools.py
+    └── .env               # local configuration; don't commit
+```
+
+Create the folder/files if they don't exist:
+
+```powershell
+New-Item -ItemType Directory -Force websearch_agent
+New-Item -ItemType File -Force websearch_agent\__init__.py
+New-Item -ItemType File -Force websearch_agent\agent.py
+New-Item -ItemType File -Force websearch_agent\tools.py
+```
+
+In `websearch_agent/__init__.py`:
+
+```python
+from . import agent
+```
+
+**Why:** `__init__.py` makes the folder a regular Python package. When it is imported, `from . import agent` imports `agent.py`, where ADK will find `root_agent`. Importing the module constructs an agent object; it **does not** start an independent agent process or automatically send a request to Ollama. Some Python namespace packages work without `__init__.py`, but this convention is appropriate for the ADK layout.
+
+## 6. Set environment configuration
+
+In `websearch_agent/.env`:
 
 ```dotenv
-GITLAB_URL=https://gitlab.com
-GITLAB_TOKEN=your_personal_access_token
+OLLAMA_API_BASE=http://localhost:11434
 ```
 
-Use this **instead of** the gateway's `[mcp_servers.gitlab]` block, with your actual absolute paths:
+Use plain `KEY=VALUE`, **not** PowerShell `$env:...` syntax and **not** a Markdown link. ADK development tooling loads the agent's `.env` configuration; your agent code below also explicitly passes the API base address, keeping that connection clear.
 
-```toml
-[mcp_servers.gitlab]
-command = 'D:\Projects\AI projects\MCPs\GitLab Automation\gitlab-mcp\.venv\Scripts\python.exe'
-args = ['D:\Projects\AI projects\MCPs\GitLab Automation\gitlab-mcp\src\server.py']
-startup_timeout_sec = 60
+In the root `.gitignore`:
+
+```gitignore
+.venv/
+**/.env
+__pycache__/
+.pytest_cache/
 ```
 
-Remove the gateway-specific `[mcp_servers.gitlab.env]` table for this alternative. Restart Codex. Running `src/server.py` alone starts a protocol process that waits for an MCP client; it is not an interactive chat application.
+**Why:** Never commit future API keys or credentials. For production, inject configuration and secrets through the deployment environment or a secrets manager.
 
-For local development, run the mocked tests:
+## 7. Implement and test the DuckDuckGo tool independently
+
+In `websearch_agent/tools.py`:
+
+```python
+from ddgs import DDGS
+
+
+def search_web(query: str) -> dict:
+    """Search the web for current information.
+
+    Args:
+        query: Search terms describing the information to find.
+
+    Returns:
+        A dictionary with status, query and search results or an error.
+    """
+    try:
+        results = DDGS(timeout=10).text(
+            query=query,
+            max_results=5,
+            backend="duckduckgo",
+        )
+        return {
+            "status": "success",
+            "query": query,
+            "results": [
+                {
+                    "title": item.get("title", ""),
+                    "url": item.get("href", ""),
+                    "snippet": item.get("body", ""),
+                }
+                for item in results
+            ],
+        }
+    except Exception as exc:
+        return {"status": "error", "query": query, "message": str(exc)}
+```
+
+Test it **without ADK or Ollama**:
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests
+python -c "from ddgs import DDGS; print('DDGS import OK')"
+python -c "from websearch_agent.tools import search_web; from pprint import pprint; pprint(search_web('Official Python documentation'))"
 ```
 
-## 2. Run locally with Docker Agent and Ollama, and use skills
+Expect a dictionary with `status: success` and a `results` list. A successful status with an empty results list is still insufficient for answering the question. Search requests may occasionally fail due to networking, rate limits, or search-provider changes.
 
-### Step 1 — Complete the shared Docker/GitLab setup
+**Why independent tests:** If this fails, the problem is in DDGS/networking or the function, **not** in model inference or agent orchestration. Keep tool logic separate from the framework so it can later be reused in FastAPI or MCP.
 
-Complete section 1, steps **2–7**, skipping the Codex installation if using only Docker Agent. You need the image, secrets, and `gitlab` profile. Codex configuration is not required for this route.
+## 8. Configure `root_agent` and register the tool
 
-Verify Docker Agent is available:
+In `websearch_agent/agent.py`:
+
+```python
+from google.adk.agents import Agent
+from google.adk.models.lite_llm import LiteLlm
+from .tools import search_web
+
+root_agent = Agent(
+    name="websearch_agent",
+    model=LiteLlm(
+        model="ollama_chat/llama3.2:latest",
+        api_base="http://localhost:11434",
+    ),
+    description="Local AI agent that can search the web.",
+    instruction="""
+    You are a research assistant with web search capabilities.
+
+    When asked about recent events, latest products or current facts,
+    use search_web instead of relying on memorized information.
+    Prefer official sources, verify dates, and include source URLs.
+    Do not treat photo captions as evidence of new product releases.
+    Never claim that a search happened unless the tool was used.
+    If search results do not substantiate an answer, say so.
+    Do not invent prices, product releases or exchange rates.
+    """,
+    tools=[search_web],
+)
+```
+
+- `root_agent` is the discoverable ADK agent definition.
+- `LiteLlm(model="ollama_chat/...")` connects ADK to Ollama's chat API.
+- `tools=[search_web]` registers the **Python function**, enabling ADK to expose its name, docstring and argument schema to the model.
+- The model **requests** a tool call; ADK **executes** it. Llama does not run your Python function directly.
+
+Test that imports and construction work:
 
 ```powershell
-docker agent version
-docker agent --help
+python -c "from websearch_agent.agent import root_agent; print(root_agent.name)"
 ```
 
-If unavailable, follow the [Docker Agent installation guide](https://docs.docker.com/ai/docker-agent/) for your platform/version. The commands below use `docker agent`, the Docker CLI plugin.
+Expected: `websearch_agent`. This test alone does **not** prove Ollama responded.
 
-### Step 2 — Install and start Ollama
+## 9. Start the ADK development Web UI
 
-Install [Ollama](https://ollama.com/download), then download the configured model:
+From the **parent** `Agentwithwebsearch/` directory:
 
 ```powershell
-ollama pull llama3.2
-ollama list
+.\.venv\Scripts\Activate.ps1
+adk web --port 8000 .
 ```
 
-Ollama normally starts its local server automatically. If it is not running, use `ollama serve` in a separate terminal and leave it running. Do not start a second server if the default port is already in use.
+Open `http://localhost:8000` and select `websearch_agent`.
 
-Check its model endpoint:
+**Why the parent?** The `.` argument is the *agents directory*. ADK discovers agent application folders **inside** that directory, such as `websearch_agent/`. Running from inside `websearch_agent/` with `.` would direct discovery to the wrong level; use `..` to refer to the parent if starting there.
+
+**Who starts the agent?** `adk web` runs the development server and loads agent definitions through ADK's runtime. You do **not** need to run `python agent.py` separately. The Ollama process is separate and should already be listening on port `11434`.
+
+Try a basic model prompt, then:
+
+> Use search_web to find the official Python documentation. List three results with their URLs.
+
+ADK's Web UI on port `8000` is **not** the Ollama API. It is for development and debugging, not the recommended production serving setup.
+
+## 10. Verify real tool execution in the ADK trace
+
+Don't conclude a search happened simply because the model says it searched.
+
+In the ADK Web UI, inspect **Trace / Events** for:
+
+1. An LLM call generating `function_call`, with `name: search_web` and arguments such as `{"query":"official Python documentation"}`.
+2. The Python tool executing and returning `function_response` with `status: success` and actual results.
+3. A second model call incorporating those results into the final answer.
+
+In the observed project trace, two LLM calls took much longer than the search tool (approximately **29.78 s** and **20.97 s**, versus **1.09 s** for the search). This is a local observation, not a benchmark; it illustrates that local model inference can dominate end-to-end response latency.
+
+## 11. Debugging the incorrect “latest iPhone” answer
+
+The test question `Which is the latest iPhone?` initially generated an inaccurate answer naming iPhone 15 models and combining them with a newer A20 Pro chip. After changing the prompt, the model answered iPhone 17, which was also outdated for October 2026.
+
+The trace established that tool invocation **did happen**. The model sent `search_web` a query similar to `latest iPhone model`, which returned snippets including:
+
+- A Wikipedia **image caption** listing iPhone 15 models.
+- An Apple landing-page snippet mentioning **A20 Pro** but not explicitly naming a phone in that snippet.
+- Generic Apple model comparison and support pages.
+- A comparison article mentioning **iPhone 18**.
+
+The LLM appears to have mixed details across results instead of verifying an authoritative announcement. This is a **grounding/evidence-selection failure**, compounded by broad search queries and short snippets. The exact reason for each generated token cannot be established from the trace.
+
+### How to debug this systematically
+
+1. Verify whether `function_call` occurred. If not, improve tool routing or enforce retrieval in application code.
+2. Inspect the **exact query** the model generated. A query without the current year can retrieve old results.
+3. Inspect the **actual returned snippets**, their relevance, dates and source quality.
+4. Verify whether the correct answer is present in the tool results. If it is, the failure is downstream in answer generation/evidence selection.
+5. Compare against official manufacturer release announcements; search snippets are not always sufficient evidence.
+6. If needed, enhance the tool to search official sites or fetch page content, and evaluate a stronger tool-calling model.
+
+Reproduce a targeted search directly:
 
 ```powershell
-Invoke-RestMethod -Uri 'http://localhost:11434/v1/models'
+python -c "from websearch_agent.tools import search_web; from pprint import pprint; pprint(search_web('Apple latest iPhone October 2026 site:apple.com'))"
 ```
 
-Docker Agent's `ollama/llama3.2` configuration connects to the local OpenAI-compatible endpoint at `http://localhost:11434/v1`; no hosted model API key is needed. GitLab API requests still need network access and the GitLab token. See [Docker Agent local providers](https://docs.docker.com/ai/docker-agent/providers/local/).
+**Important:** Merely instructing a model to “always search” does not guarantee that it will follow the instruction. For production correctness, enforce mandatory retrieval and validation using Python application logic, add trusted-source filtering, and test with an evaluation set.
 
-### Step 3 — Understand the agent configuration
+## 12. Common troubleshooting
 
-Use the supplied `src/agent.yaml`. Its structure is:
+| Symptom | Likely cause | What to check |
+|---|---|---|
+| `adk` not recognized | ADK not installed in active environment or `.venv/Scripts` not on PATH | Activate `.venv`; `python -m pip show google-adk`; `Get-Command adk`; try `.\.venv\Scripts\adk.exe --help` |
+| Yellow/blue VS Code import underline | Pylance interpreter/diagnostic | Hover over underline; select `.venv` using **Python: Select Interpreter**; confirm imports in terminal |
+| `No module named 'mcp'` inside LiteLLM error | Missing dependency in tested environment | Add `mcp` to requirements, reinstall, `python -c "import mcp"`, `python -m pip check` |
+| Agent not visible in Web UI | Incorrect agents directory/layout/import errors | Run `adk web --port 8000 .` from project root; check `__init__.py` and `root_agent` |
+| Ollama connection error | Ollama stopped or wrong URL/port | `Invoke-RestMethod http://localhost:11434/api/tags`; verify model name |
+| Tool exists but isn't called | Tool-selection failure | Inspect model `function_call`, improve description and prompt, or enforce call in code |
+| Tool called but answer wrong | Poor query, outdated snippets, weak grounding | Inspect `function_response`; compare primary source; improve retrieval and evaluation |
 
-```yaml
-agents:
-  root:
-    model: ollama/llama3.2
-    skills: [deploy-myproj, deploy-myproj2]
-    instruction: |
-      Use the GitLab MCP tools and load the matching deployment skill.
-    toolsets:
-      - type: user_prompt
-      - type: filesystem
-      - type: mcp
-        command: docker
-        args: ["mcp", "gateway", "run", "--profile=gitlab"]
-        env:
-          PATH: 'C:\Program Files\Docker\Docker\resources\bin;C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem'
-```
-
-This excerpt explains the structure; the actual file contains more instructions and the complete tool whitelist. Keep that file rather than replacing it with this abbreviated example.
-
-- `model` selects the local Ollama model.
-- `instruction` supplies shared routing and result-reporting rules.
-- `skills` selects the discovered deployment workflows by name.
-- `filesystem` lets the agent read skill files.
-- `user_prompt` lets it ask for a concrete alternative job choice and resume after approval.
-- The `mcp` toolset starts the Docker Gateway subprocess using the `gitlab` profile.
-- Its `tools` whitelist controls which discovered GitLab tools the model sees.
-- Its `env.PATH` fixes Windows child-process lookup of Docker.
-
-Ollama generates model responses; it does not connect to GitLab or run the MCP server itself. Docker Agent executes the model's tool calls through the gateway.
-
-### Step 4 — Understand how skills are loaded
-
-A skill is a folder containing `SKILL.md`, for example:
-
-```markdown
----
-name: deploy-myproj2
-description: Create or reuse a release tag in anish5416/myproj2 and run a requested GitLab job.
----
-
-Project-specific workflow instructions go here.
-```
-
-The agent discovers local skill metadata when starting, then loads a matching skill through `read_skill`. Its full instructions enter context when selected, rather than putting every project's full workflow in the main agent instructions. The skills are not registered inside the Docker profile. See [Docker Agent skills](https://docs.docker.com/ai/docker-agent/features/skills/).
-
-The included workflows:
-
-| Request | Project | Default behavior |
-| --- | --- | --- |
-| `deploy proj` | `anish5416/myproj` | Prepare the next `v<number>` tag on `main`; run a job only if requested. |
-| `deploy proj2` | `anish5416/myproj2` | Prepare the next `proj<number>` tag on `main`, then run `build_app`. |
-| Explicit tag/job request | The named project's exact path | Honor the supplied tag and job names instead of defaults. |
-
-For new projects, create another `.agents/skills/<skill-name>/SKILL.md`, configure its exact project path and workflow, and add its name to `skills` in `src/agent.yaml`. Update shared routing only as needed. No image rebuild is needed for skill-only edits, because clients read skills locally.
-
-### Step 5 — Verify tools and skills before running
-
-From the project root:
+Useful checks:
 
 ```powershell
-docker agent debug skills .\src\agent.yaml
-docker agent debug toolsets .\src\agent.yaml
+python -c "import sys; print(sys.executable)"
+python -m pip --version
+python -m pip show google-adk litellm ddgs mcp
+python -m pip check
+Get-Command adk
 ```
 
-Expect both deployment skills, `read_skill`, `user_prompt`, filesystem tools, and the **11 GitLab tools whitelisted in the agent configuration**, including `prepare_release`, `list_pipeline_jobs`, and `play_job`. The server itself has 12 GitLab tools, but this agent hides `get_next_tag` to avoid placeholder project-ID calls.
+## 13. Next steps (not implemented yet)
 
-### Step 6 — Start the agent and request a release
+1. Improve search quality: date-aware queries, primary-source lookup, page extraction, and explicit evidence validation.
+2. Add `convert_currency(amount, from_currency, to_currency)` backed by a reliable exchange-rate API. Validate ISO currency codes, handle failures and timestamps, and **never ask the LLM to invent an exchange rate**.
+3. Test orchestration: ask for an online product price, inspect source currency and price, obtain a live rate, then convert using deterministic Python arithmetic.
+4. Write automated tests for tools and evaluation cases for the agent.
+5. Explore converting functions into an **MCP server** if interoperability with other hosts is necessary.
+6. Later, containerize the app and design an appropriate production API/session store and model-hosting strategy on AWS. **Don't use `adk web` as your production server.**
 
-```powershell
-docker agent run .\src\agent.yaml
-```
+## Key lessons
 
-Use `/tools` to inspect available tools. Start with a read-only request such as `list my GitLab projects`, then use a live workflow:
-
-```text
-deploy proj2
-deploy proj2 and run the build_app job in the pipeline that is triggered
-create a tag v2 in myproj2 and run the build_app GitLab job
-```
-
-If automatic skill selection fails, explicitly request:
-
-```text
-Use the deploy-myproj2 skill to deploy proj2 and run build_app.
-```
-
-The configured workflow:
-
-1. Load the correct skill and exact namespace/project path.
-2. Call `prepare_release`, which resolves the real project ID internally. For an omitted tag, calculate the next matching number. For an explicit tag, reuse it if present or create it if absent.
-3. Use the confirmed project ID, tag, and target SHA from the tool response.
-4. Find the newest pipeline matching both tag ref and SHA. Allow the tag-triggered pipeline to appear; if none exists, start one on that tag.
-5. Read the actual pipeline job names and IDs.
-6. Run the requested/default job if it is manual, or monitor it if already scheduled. If missing, show actual alternatives and ask before playing a different job.
-7. After approval, continue on the same tag/pipeline with the approved job. Do not create another release.
-8. Report the verified job state and links. Tag creation or job scheduling is not proof that an application has been deployed.
-
-GitLab CI rules determine which other automatic jobs run. `play_job` starts manual jobs; it cannot make a job omitted by CI rules appear. Existing tags are reused without being moved, even if `main` has changed.
-
-### Step 7 — Apply updates correctly
-
-After changing server/tool code:
-
-```powershell
-docker build -f DockerFile -t gitlab-automation-mcp:local .
-```
-
-Then close the agent and start a fresh session. Restart the Codex MCP connection too if using Codex. Existing gateway processes/containers may still use the previous image.
-
-After changing `docker-mcp-server.yaml`, copy it to the catalog directory again and run the profile server add/update command from section 1, step 6.
-
-After changing skills or `src/agent.yaml`, restart Docker Agent in a fresh conversation; no image rebuild is needed unless Python code changed. Avoid resuming old conversations that contain invented IDs or outdated tool descriptions.
-
-### Step 8 — Troubleshoot each layer
-
-| Symptom | Check / resolution |
-| --- | --- |
-| `1 toolset, 0 tools` | Run the gateway's verbose tool listing first. Inspect startup errors rather than assuming a model problem. |
-| `exec: "docker": executable file not found in %PATH%` | Ensure the MCP subprocess `PATH` includes Docker's installation directory. An absolute initial executable path alone does not fix the gateway's child-process lookup. |
-| `Docker Desktop is not running` | Verify Desktop is open and `docker version` includes Server details. A restricted/sandboxed terminal may lack Docker named-pipe access even while Desktop is running. |
-| Only unrelated tools appear | Verify `--profile=gitlab` is present; the default profile can contain different servers. |
-| Tools list succeeds but GitLab calls fail | Check secret retrieval, token expiration/scope, project permissions, and the configured GitLab URL/host. |
-| Ollama connection refused / model missing | Start Ollama, check `/v1/models`, run `ollama list`, and pull `llama3.2` if absent. |
-| Agent invents an ID or uses `get_project_id` as a string | Start a fresh session with current configuration. Use `prepare_release` with the exact project path; a placeholder is a malformed model call, not missing information from the user. |
-| Requested job does not appear | Inspect `list_pipeline_jobs`, check tag CI rules and actual job names. Approve a suggested alternative only if it is the job you want. |
-| Agent claims success without tool evidence | Verify returned tag target and actual job status. Skills guide the model but do not guarantee compliance. |
-| Profile tools tab is blank | Prefer CLI discovery as evidence; reopen the Desktop view and confirm the selected profile. |
-
-Capture Docker Agent diagnostics:
-
-```powershell
-docker agent --debug debug toolsets .\src\agent.yaml
-Get-Content -LiteralPath "$env:USERPROFILE\.cagent\cagent.debug.log" -Tail 60
-```
-
-Local `llama3.2` testing previously produced invented IDs, invalid arguments, and unsupported success claims. The current tool design reduces those failure modes, but a successful discovery test is not proof of reliable end-to-end model behavior. Review actual tool results and GitLab state when diagnosing a run.
-
-The current mocked test suite verifies tag numbering/pagination, existing-tag reuse, lost-response recovery, project-path release preparation, pipeline filtering, job listing, and the play endpoint. It does not certify live CI deployment or model instruction-following.
+- **Python package**: `__init__.py` controls package initialization; importing a package can execute module-level code.
+- **Agent vs model**: ADK orchestrates; Ollama performs local inference.
+- **Agent vs tool**: Agent chooses operations; ADK executes registered Python tools.
+- **Tool integration vs MCP**: Registering a Python function as an ADK tool does not require an MCP server.
+- **Correctness**: A successful tool call is not proof of a correct final answer.
+- **Engineering workflow**: Validate individual functions, examine runtime traces, then improve retrieval and model behavior separately.
