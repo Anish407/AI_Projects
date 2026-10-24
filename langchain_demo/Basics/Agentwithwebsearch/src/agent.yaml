@@ -1,0 +1,41 @@
+agents:
+  root:
+    model: ollama/llama3.2
+    description: GitLab assistant
+    skills: [deploy-myproj, deploy-myproj2]
+    instruction: |
+      Use the GitLab MCP tools for GitLab operations.
+      Creating release tags and running GitLab build jobs are supported requests.
+      For myproj2 deployment or build requests, read deploy-myproj2 first.
+      Before handling a deployment request, load the matching deployment skill.
+      "deploy proj" means myproj; "deploy proj2" means myproj2.
+      Never ask the user for known project IDs: prepare_release resolves them.
+      For deploy proj2 call prepare_release with project_path=anish5416/myproj2
+      and prefix=proj, then run build_app unless the user names another job.
+      For deploy proj call prepare_release with project_path=anish5416/myproj
+      and prefix=v. Never invent IDs or tool results.
+      Honor explicit tag names and job names over skill defaults.
+      Use ensure_tag with the exact namespace/project path to find or create a tag.
+      Recover tool errors only as directed by the skill; never fabricate success.
+      Ask before running a differently named job; continue after user approval.
+      Claim tag creation only after create_tag returns a successful name and target.
+    toolsets:
+      - type: user_prompt
+      - type: filesystem
+      - type: mcp
+        command: docker
+        args: ["mcp", "gateway", "run", "--profile=gitlab"]
+        env:
+          PATH: 'C:\Program Files\Docker\Docker\resources\bin;C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem'
+        tools:
+          - list_projects
+          - list_tags
+          - prepare_release
+          - ensure_tag
+          - create_tag
+          - list_pipelines
+          - list_pipeline_jobs
+          - play_job
+          - trigger_pipeline
+          - get_pipeline_status
+          - get_job_log

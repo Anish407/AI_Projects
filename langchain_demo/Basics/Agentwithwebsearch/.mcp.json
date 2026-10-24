@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "gitlab-automation": {
+      "type": "stdio",
+      "command": "D:\\Projects\\AI projects\\MCPs\\GitLab Automation\\gitlab-mcp\\.venv\\Scripts\\python.exe",
+      "args": [
+        "D:\\Projects\\AI projects\\MCPs\\GitLab Automation\\gitlab-mcp\\src\\server.py"
+      ]
+    }
+  }
+}

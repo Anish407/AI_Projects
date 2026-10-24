@@ -1,0 +1,7 @@
+mcp[cli]>=2.0
+httpx>=0.28
+python-dotenv>=1.0
+google-adk
+litellm>=1.84
+ddgs
+mcp

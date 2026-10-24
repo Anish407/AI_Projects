@@ -1,0 +1,16 @@
+name: gitlab-automation
+title: GitLab Automation
+type: server
+image: gitlab-automation-mcp:local
+description: Search GitLab projects and manage tags, pipelines, and CI job logs.
+secrets:
+  - name: gitlab-automation.GITLAB_URL
+    env: GITLAB_URL
+    example: https://gitlab.com
+    description: GitLab instance URL.
+  - name: gitlab-automation.GITLAB_TOKEN
+    env: GITLAB_TOKEN
+    example: glpat-xxxxxxxxxxxxxxxxxxxx
+    description: GitLab personal access token.
+allowHosts:
+  - gitlab.com:443

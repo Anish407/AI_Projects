@@ -1,0 +1,42 @@
+# Python environments
+**/.venv/
+**/venv/
+**/env/
+
+# Python cache and test files
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets and local configuration
+.env
+**/.env
+.env.*
+!.env.example
+
+# Google ADK and local runtime data
+.adk/
+**/.adk/
+
+# Editors and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# JavaScript dependencies and build output
+node_modules/
+dist/
+build/
+
+# Local databases and logs
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Local Codex/configuration files
+.codex/
+.aws/
